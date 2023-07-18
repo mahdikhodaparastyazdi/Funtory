@@ -50,16 +50,19 @@ func connectDB() {
 	}
 	defer db.Close()
 }
+
 func connectSessionDB() {
 	container, err = sqlstore.New("postgres", "host=127.0.0.1 dbname=mydb user=myuser password=1234 port=5432", dbLog)
 	if err != nil {
 		panic(err)
 	}
 }
+
 func initial() {
 	connectDB()
 	connectSessionDB()
 }
+
 func main() {
 
 	dbLog = waLog.Stdout("Database", "DEBUG", true)
@@ -75,36 +78,44 @@ func main() {
 	<-c
 	client.Disconnect()
 }
+
 func handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	userIdStr := r.URL.Query().Get("userId")
-	userId, err := strconv.Atoi(userIdStr)
+	_, err := strconv.Atoi(userIdStr)
 	if err != nil {
 		http.Error(w, "Invalid userId", http.StatusBadRequest)
 		return
 	}
+
+	jidString, check := findJid(userIdStr)
+	if check {
+		var jid types.JID
+		err = json.Unmarshal([]byte(jidString), &jid)
+		if err != nil {
+			fmt.Println("Error:", err)
+			return
+		}
+
+		conectByJID(jid)
+	}
+}
+
+func findJid(userId string) (string, bool) {
 	var jidString string
 	err = db.QueryRow("SELECT jid FROM users WHERE id = $1", userId).Scan(&jidString)
 	if err == sql.ErrNoRows {
-		http.Error(w, "User not found", http.StatusNotFound)
-		return
+		return "User not found", false
 	} else if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
-		log.Fatal(err)
+		return "Database error", false
 	}
-	var jid types.JID
-	err = json.Unmarshal([]byte(jidString), &jid)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return
-	}
-	conectByJID(jid)
+	return jidString, true
 }
 
 func conectByJID(jid types.JID) {
 	deviceStore, err := container.GetDevice(jid)
 	if err != nil {
-		panic(err)
+		return
 	}
 	clientLog := waLog.Stdout("Client", "DEBUG", true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
@@ -114,7 +125,7 @@ func conectByJID(jid types.JID) {
 		qrChan, _ := client.GetQRChannel(context.Background())
 		err = client.Connect()
 		if err != nil {
-			panic(err)
+			return
 		}
 		for evt := range qrChan {
 			if evt.Event == "code" {
@@ -128,7 +139,7 @@ func conectByJID(jid types.JID) {
 		// Already logged in, just connect
 		err = client.Connect()
 		if err != nil {
-			panic(err)
+			return
 		}
 	}
 
