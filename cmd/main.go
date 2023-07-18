@@ -2,16 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
 	"database/sql"
 	"net/http"
-
-	"WHATSMEOW/api"
 
 	_ "github.com/lib/pq"
 	_ "github.com/mattn/go-sqlite3"
@@ -24,8 +24,11 @@ import (
 )
 
 var (
-	err error
-	db  *sql.DB
+	err       error
+	db        *sql.DB
+	container *sqlstore.Container
+	dbLog     waLog.Logger
+	client    *whatsmeow.Client
 )
 
 type SecondRequestResponse struct {
@@ -45,36 +48,64 @@ func connectDB() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer db.Close()
+}
+func connectSessionDB() {
+	container, err = sqlstore.New("postgres", "host=127.0.0.1 dbname=mydb user=myuser password=1234 port=5432", dbLog)
+	if err != nil {
+		panic(err)
+	}
 }
 func initial() {
 	connectDB()
-	defer db.Close()
+	connectSessionDB()
 }
 func main() {
 
-	dbLog := waLog.Stdout("Database", "DEBUG", true)
+	dbLog = waLog.Stdout("Database", "DEBUG", true)
 	initial()
 	fmt.Println(db)
-	http.HandleFunc("/connect", api.HandleRequest)
+	http.HandleFunc("/connect", handleRequest)
 
 	log.Println("Server started on port 8080")
 	log.Fatal(http.ListenAndServe(":8080", nil))
 
-	// psqlconn := fmt.Sprintf("host=%s port=%d user=%s password=%s dbname=%s sslmode=disable", host, port, user, password, dbname)
-	// Make sure you add appropriate DB connector imports, e.g. github.com/mattn/go-sqlite3 for SQLite
-	container, err := sqlstore.New("postgres", "host=127.0.0.1 dbname=mydb user=myuser password=1234 port=5432", dbLog)
+	c := make(chan os.Signal)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	<-c
+	client.Disconnect()
+}
+func handleRequest(w http.ResponseWriter, r *http.Request) {
+
+	userIdStr := r.URL.Query().Get("userId")
+	userId, err := strconv.Atoi(userIdStr)
 	if err != nil {
-		panic(err)
+		http.Error(w, "Invalid userId", http.StatusBadRequest)
+		return
+	}
+	var jidString string
+	err = db.QueryRow("SELECT jid FROM users WHERE id = $1", userId).Scan(&jidString)
+	if err == sql.ErrNoRows {
+		http.Error(w, "User not found", http.StatusNotFound)
+		return
+	} else if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		log.Fatal(err)
 	}
 	var jid types.JID
-	fmt.Print(jid)
+	err = json.Unmarshal([]byte(jidString), &jid)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+	conectByJID(jid)
+}
 
-	// If you want multiple sessions, remember their JIDs and use .GetDevice(jid) or .GetAllDevices() instead.
-	deviceStore, err := container.GetFirstDevice()
+func conectByJID(jid types.JID) {
+	deviceStore, err := container.GetDevice(jid)
 	if err != nil {
 		panic(err)
 	}
-	deviceStore.ID.User = ""
 	clientLog := waLog.Stdout("Client", "DEBUG", true)
 	client := whatsmeow.NewClient(deviceStore, clientLog)
 	client.AddEventHandler(eventHandler)
@@ -101,10 +132,4 @@ func main() {
 		}
 	}
 
-	// Listen to Ctrl+C (you can also do something else that prevents the program from exiting)
-	c := make(chan os.Signal)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c
-
-	client.Disconnect()
 }
